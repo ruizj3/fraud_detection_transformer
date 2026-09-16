@@ -1,0 +1,59 @@
+data:
+  # mode: "file" reads a Parquet/CSV snapshot exported from the pipeline warehouse.
+  # mode: "db" reads live from the local-gcp-mirror-pipeline Postgres warehouse.
+  mode: file
+  file_path: data/fraud_events.parquet
+  db:
+    host: localhost
+    port: 5433
+    dbname: analytics_warehouse
+    user: pipeline_user
+    password: pipeline_password
+    table: fraud_events
+
+  target_column: is_fraud
+
+  # Columns produced by local-gcp-mirror-pipeline's mock_producer.py / fraud_events table.
+  categorical_columns:
+    - merchant_category
+    - device
+    - payment_method
+    - is_new_device
+    - country
+    - ip_country
+  continuous_columns:
+    - amount
+    - account_age_days
+    - time_since_last_txn_seconds
+    - txn_count_last_1h
+    - distance_from_home_km
+
+  # Metadata columns present in the source data but excluded from model features
+  # (identifiers, timestamps, and the scenario label would leak the target).
+  drop_columns:
+    - event_id
+    - event_timestamp
+    - user_id
+    - fraud_scenario
+
+  test_size: 0.15
+  val_size: 0.15
+  random_seed: 42
+
+model:
+  dim: 32
+  depth: 4
+  heads: 4
+  dim_feedforward: 64
+  dropout: 0.1
+
+training:
+  batch_size: 256
+  epochs: 20
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  focal_loss_alpha: 0.25
+  focal_loss_gamma: 2.0
+  early_stopping_patience: 4
+  checkpoint_dir: checkpoints
+  device: auto  # auto | cpu | cuda | mps
