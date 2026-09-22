@@ -1,10 +1,14 @@
+import argparse
 import logging
+import os
 import random
+import time
 
 import numpy as np
 import torch
 
-from dataset import load_config, build_dataloaders
+from dataset import load_config, load_dataframe, build_dataloaders, save_inference_meta
+from drift import compute_reference_stats, save_reference_stats, load_reference_stats, has_drifted
 from model import TabularTransformer
 from engine import train, evaluate, FocalLoss, resolve_device
 
@@ -18,12 +22,9 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
 
 
-def main():
-    logger.info("Loading config.yaml...")
-    config = load_config("config.yaml")
-    set_seed(config["data"].get("random_seed", 42))
-
-    logger.info("Loading data and building dataloaders (mode=%s)...", config["data"].get("mode", "file"))
+def run_training_cycle(config):
+    data_cfg = config["data"]
+    logger.info("Building dataloaders (mode=%s)...", data_cfg.get("mode", "file"))
     train_loader, val_loader, test_loader, meta = build_dataloaders(config)
     logger.info(
         "Loaded %d train / %d val / %d test rows | %d categorical features / %d continuous features",
@@ -57,6 +58,52 @@ def main():
         test_metrics["loss"], test_metrics["roc_auc"], test_metrics["pr_auc"], test_metrics["f1"],
     )
 
+    checkpoint_dir = training_cfg.get("checkpoint_dir", "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    save_inference_meta(meta, data_cfg["categorical_columns"], data_cfg["continuous_columns"],
+                         os.path.join(checkpoint_dir, "inference_meta.pkl"))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train the tabular transformer, retraining on data drift.")
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--once", action="store_true", help="Run a single drift-check/train pass and exit.")
+    args = parser.parse_args()
+
+    logger.info("Loading config.yaml...")
+    config = load_config(args.config)
+    set_seed(config["data"].get("random_seed", 42))
+
+    data_cfg = config["data"]
+    cat_cols = data_cfg["categorical_columns"]
+    cont_cols = data_cfg["continuous_columns"]
+
+    drift_cfg = config.get("drift", {})
+    drift_enabled = drift_cfg.get("enabled", False)
+    threshold = drift_cfg.get("threshold", 0.25)
+    stats_path = drift_cfg.get("reference_stats_path", "checkpoints/reference_stats.json")
+    check_interval = drift_cfg.get("check_interval_seconds", 300)
+
+    while True:
+        if drift_enabled:
+            df = load_dataframe(data_cfg)
+            reference_stats = load_reference_stats(stats_path)
+            drifted, score, _ = has_drifted(reference_stats, df, cat_cols, cont_cols, threshold)
+            if not drifted:
+                logger.info("No significant drift detected (score=%.4f < threshold=%.4f); skipping retrain.",
+                             score, threshold)
+            else:
+                logger.info("Drift threshold crossed (score=%s >= %.4f); retraining...", score, threshold)
+                run_training_cycle(config)
+                save_reference_stats(compute_reference_stats(df, cat_cols, cont_cols), stats_path)
+        else:
+            run_training_cycle(config)
+
+        if args.once:
+            break
+        time.sleep(check_interval)
+
 
 if __name__ == "__main__":
     main()
+
