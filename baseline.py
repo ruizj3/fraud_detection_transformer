@@ -29,8 +29,10 @@ def main():
     feature_cols = cat_cols + cont_cols
     logger.info("Loaded %d rows | %d categorical / %d continuous features", len(df), len(cat_cols), len(cont_cols))
 
+    # sklearn 1.3's HistGradientBoostingClassifier requires categorical columns to be
+    # integer-encoded (raw string/category dtypes are not supported until sklearn 1.4).
     for col in cat_cols:
-        df[col] = df[col].astype("category")
+        df[col] = df[col].astype("category").cat.codes.astype("float64")
 
     x = df[feature_cols]
     y = df[target_col].astype(int).values

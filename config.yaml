@@ -1,14 +1,15 @@
 data:
   # mode: "file" reads a Parquet/CSV snapshot exported from the pipeline warehouse.
-  # mode: "db" reads live from the local-gcp-mirror-pipeline Postgres warehouse.
-  mode: file
+  # mode: "db" reads from this repo's own Postgres db (see the `ingest` section and
+  # docker-compose.yml), which is periodically populated by ingest.py from data/.
+  mode: db
   file_path: data/fraud_events.parquet
   db:
     host: localhost
-    port: 5433
-    dbname: analytics_warehouse
-    user: pipeline_user
-    password: pipeline_password
+    port: 5544
+    dbname: fraud_training
+    user: fraud
+    password: fraud_password
     table: fraud_events
 
   target_column: is_fraud
@@ -39,6 +40,46 @@ data:
   test_size: 0.15
   val_size: 0.15
   random_seed: 42
+
+# Gates retraining behind data drift: main.py only re-splits/retrains once the
+# live data has moved enough from the last training snapshot, instead of on every run.
+drift:
+  enabled: true
+  threshold: 0.25
+  check_interval_seconds: 300
+  reference_stats_path: checkpoints/reference_stats.json
+
+# Config for the live scoring loop (serve.py), which continuously scores new
+# transactions with the current best checkpoint and persists predictions to Postgres.
+serving:
+  enabled: true
+  poll_interval_seconds: 15
+  batch_size: 256
+  predictions_table: fraud_predictions
+
+# Config for ingest.py / the `ingester` Docker Compose service, which periodically pulls
+# new rows from the pipeline's live warehouse into this repo's own `db` for train/test splitting.
+ingest:
+  poll_interval_seconds: 300
+
+  # Source: local-gcp-mirror-pipeline's live Postgres warehouse. Must be running
+  # (cd ../local-gcp-mirror-pipeline && docker compose up -d).
+  source:
+    host: localhost
+    port: 5433
+    dbname: analytics_warehouse
+    user: pipeline_user
+    password: pipeline_password
+    table: fraud_events
+
+  # Destination: this repo's own Postgres db, used for train/test splitting.
+  db:
+    host: localhost
+    port: 5544
+    dbname: fraud_training
+    user: fraud
+    password: fraud_password
+    table: fraud_events
 
 model:
   dim: 32

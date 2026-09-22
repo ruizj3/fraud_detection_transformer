@@ -1,0 +1,86 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fraud_detection_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fraud_training
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: fraud_password
+    ports:
+      - "5544:5432"
+    volumes:
+      - fraud_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud -d fraud_training"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Web UI for browsing fraud_training (http://localhost:8082, server=postgres, see below for creds).
+  adminer:
+    image: adminer:4.8.1
+    container_name: fraud_detection_adminer
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "8082:8080"
+
+  ingester:
+    build:
+      context: .
+      dockerfile: Dockerfile.ingest
+    container_name: fraud_detection_ingester
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Destination db (this repo's own postgres service, above).
+      DEST_DB_HOST: postgres
+      DEST_DB_PORT: "5432"
+      # Source db (local-gcp-mirror-pipeline's warehouse, exposed on the host at 5433).
+      SOURCE_DB_HOST: host.docker.internal
+      SOURCE_DB_PORT: "5433"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: fraud_detection_trainer
+    restart: unless-stopped
+    command: ["python", "main.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./checkpoints:/app/checkpoints
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: fraud_detection_server
+    restart: unless-stopped
+    command: ["python", "serve.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./checkpoints:/app/checkpoints
+
+volumes:
+  fraud_postgres_data:

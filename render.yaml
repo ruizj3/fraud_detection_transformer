@@ -1,0 +1,65 @@
+# Render Blueprint for fraud_detection_transformer.
+#
+# Deploy AFTER local-gcp-mirror-pipeline/render.yaml — `SOURCE_URL` below references
+# that Blueprint's `analytics-warehouse` database by name. Cross-repo `fromDatabase`
+# references work as long as both Blueprints sync into the same Render workspace.
+#
+# Same suspend-between-demos cost model as the pipeline repo: paid services here bill
+# prorated to the second while running and $0 while suspended in the Dashboard.
+#
+# The trainer and scorer are combined into ONE worker (instead of two, like
+# docker-compose) because Render persistent disks can't be shared across services —
+# they need the same checkpoints/ directory.
+
+services:
+  - type: worker
+    name: fraud-ingester
+    runtime: docker
+    dockerfilePath: ./Dockerfile.ingest
+    dockerContext: .
+    plan: starter
+    envVars:
+      - key: DEST_URL
+        fromDatabase:
+          name: fraud-training
+          property: connectionString
+      - key: SOURCE_URL
+        fromDatabase:
+          name: analytics-warehouse # defined in local-gcp-mirror-pipeline/render.yaml
+          property: connectionString
+
+  # Runs main.py (drift-gated retraining) and serve.py (live scoring) in one container
+  # so both share the same /app/checkpoints disk.
+  - type: worker
+    name: fraud-trainer-and-server
+    runtime: docker
+    dockerfilePath: ./Dockerfile.app
+    dockerContext: .
+    dockerCommand: sh -c "python main.py & python serve.py & wait"
+    plan: starter # bump to standard if training OOMs on 512MB
+    envVars:
+      - key: DB_URL
+        fromDatabase:
+          name: fraud-training
+          property: connectionString
+    disk:
+      name: checkpoints
+      mountPath: /app/checkpoints
+      sizeGB: 1
+
+  # Optional: free web UI for browsing fraud_training / fraud_predictions.
+  - type: web
+    name: adminer
+    runtime: image
+    image:
+      url: adminer:4.8.1
+    plan: free
+
+databases:
+  - name: fraud-training
+    databaseName: fraud_training
+    user: fraud
+    plan: basic-256mb # $6/mo while running; consider reusing one Postgres instance
+                       # across both repos (via `psql` CREATE DATABASE) to cut this cost
+    diskSizeGB: 1
+    ipAllowList: []

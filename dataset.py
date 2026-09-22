@@ -1,3 +1,7 @@
+import os
+import pickle
+from urllib.parse import urlparse
+
 import yaml
 import numpy as np
 import pandas as pd
@@ -12,6 +16,40 @@ def load_config(config_path="config.yaml"):
         return yaml.safe_load(f)
 
 
+def resolve_db_config(db_cfg, env_prefix="DB"):
+    """Config values can be overridden by env vars, e.g. when running inside Docker
+    or on Render, where hosts are container/private-network names instead of localhost.
+
+    A single f"{env_prefix}_URL" (postgresql://user:pass@host:port/db, as provided by
+    Render's `fromDatabase: property: connectionString`) takes precedence over the
+    discrete _HOST/_PORT/etc. env vars when set."""
+    url = os.environ.get(f"{env_prefix}_URL")
+    if url:
+        parsed = urlparse(url)
+        return {
+            "host": parsed.hostname,
+            "port": parsed.port or db_cfg["port"],
+            "dbname": parsed.path.lstrip("/"),
+            "user": parsed.username,
+            "password": parsed.password,
+            "table": db_cfg["table"],
+        }
+    return {
+        "host": os.environ.get(f"{env_prefix}_HOST", db_cfg["host"]),
+        "port": os.environ.get(f"{env_prefix}_PORT", db_cfg["port"]),
+        "dbname": os.environ.get(f"{env_prefix}_NAME", db_cfg["dbname"]),
+        "user": os.environ.get(f"{env_prefix}_USER", db_cfg["user"]),
+        "password": os.environ.get(f"{env_prefix}_PASSWORD", db_cfg["password"]),
+        "table": db_cfg["table"],
+    }
+
+
+def get_db_engine(db_cfg):
+    from sqlalchemy import create_engine
+    url = f"postgresql+psycopg2://{db_cfg['user']}:{db_cfg['password']}@{db_cfg['host']}:{db_cfg['port']}/{db_cfg['dbname']}"
+    return create_engine(url)
+
+
 def load_dataframe(data_cfg):
     """Loads the labeled transaction data either from a file snapshot or the live warehouse."""
     mode = data_cfg.get("mode", "file")
@@ -23,10 +61,8 @@ def load_dataframe(data_cfg):
         else:
             df = pd.read_csv(path)
     elif mode == "db":
-        from sqlalchemy import create_engine
-        db = data_cfg["db"]
-        url = f"postgresql+psycopg2://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['dbname']}"
-        engine = create_engine(url)
+        db = resolve_db_config(data_cfg["db"])
+        engine = get_db_engine(db)
         df = pd.read_sql_table(db["table"], engine)
     else:
         raise ValueError(f"Unknown data mode: {mode}")
@@ -77,10 +113,22 @@ def build_dataloaders(config):
     val_size = data_cfg.get("val_size", 0.15)
 
     idx = np.arange(len(df))
-    train_idx, temp_idx = train_test_split(idx, test_size=test_size + val_size, random_state=seed, stratify=y)
+
+    def _safe_stratify(labels, n_splits_needed):
+        # Stratification requires every class to have enough members for each resulting split.
+        counts = np.bincount(labels)
+        if counts[counts > 0].min() < n_splits_needed:
+            return None
+        return labels
+
+    stratify_first = _safe_stratify(y, 2)
+    train_idx, temp_idx = train_test_split(
+        idx, test_size=test_size + val_size, random_state=seed, stratify=stratify_first
+    )
     relative_val_size = val_size / (test_size + val_size)
+    stratify_second = _safe_stratify(y[temp_idx], 2)
     val_idx, test_idx = train_test_split(
-        temp_idx, test_size=1 - relative_val_size, random_state=seed, stratify=y[temp_idx]
+        temp_idx, test_size=1 - relative_val_size, random_state=seed, stratify=stratify_second
     )
 
     # Fit the continuous-feature scaler on train only, then apply to all splits.
@@ -106,3 +154,22 @@ def build_dataloaders(config):
         "scaler": scaler,
     }
     return train_loader, val_loader, test_loader, meta
+
+
+def save_inference_meta(meta, cat_cols, cont_cols, path):
+    """Persists everything the live serving loop needs to reproduce training-time
+    encoding (label encoders + scaler) without re-running build_dataloaders."""
+    payload = {
+        "cat_cols": cat_cols,
+        "cont_cols": cont_cols,
+        "cat_cardinalities": meta["cat_cardinalities"],
+        "encoders": meta["encoders"],
+        "scaler": meta["scaler"],
+    }
+    with open(path, "wb") as f:
+        pickle.dump(payload, f)
+
+
+def load_inference_meta(path):
+    with open(path, "rb") as f:
+        return pickle.load(f)
