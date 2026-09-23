@@ -1,5 +1,54 @@
 # Fraud Detection Transformer
 
+## Service flow
+
+```mermaid
+flowchart LR
+  upstream["Upstream pipeline\nPostgres: analytics_warehouse\nfraud_events"]
+  ingester["Ingester\ningest.py\nwatermark polling"]
+  db[("Local Postgres\nfraud_training")]
+  events["fraud_events\n(labeled transactions)"]
+  trainer["Trainer\nmain.py\ndrift check + retraining"]
+  artifacts[("checkpoints/\nbest_model.pt\ninference_meta.pkl\nreference_stats.json")]
+  server["Scoring server\nserve.py\npoll + infer"]
+  predictions["fraud_predictions\nprobability + label"]
+  adminer["Adminer\noptional database UI"]
+  file["Optional file snapshot\ndata/fraud_events.csv / Parquet"]
+
+  upstream -->|new fraud_events rows| ingester
+  ingester -->|upsert| events
+  events --> db
+  db -->|load labeled data| trainer
+  file -.->|data.mode: file| trainer
+  trainer -->|save model + metadata| artifacts
+  artifacts -->|load latest checkpoint| server
+  events -->|fetch unscored rows| server
+  server -->|persist predictions| predictions
+  predictions --> db
+  db --> adminer
+  db -->|updated data| trainer
+  trainer -.->|drift threshold crossed| artifacts
+```
+
+In Docker Compose, `postgres`, `ingester`, `trainer`, `server`, and `adminer` run
+as separate services. In Render, the trainer and scoring server share one worker
+so they can use the same persistent `checkpoints/` disk.
+
+## Live service output
+
+These GIFs were captured from the running Docker Compose stack. The Postgres GIF
+shows recent rows from both tables, and the Adminer GIF cycles through the live
+schema, `fraud_events`, and `fraud_predictions` views. Refresh the text and
+database captures with `scripts/capture_service_output_gifs.sh`.
+
+| Service | Output |
+|---------|--------|
+| Ingester | ![Ingester output](artifacts/service-gifs/ingester-output.gif) |
+| Trainer | ![Trainer output](artifacts/service-gifs/trainer-output.gif) |
+| Scoring server | ![Scoring server output](artifacts/service-gifs/server-output.gif) |
+| Postgres | ![Postgres output](artifacts/service-gifs/postgres-output.gif) |
+| Adminer | ![Adminer output](artifacts/service-gifs/adminer-output.gif) |
+
 ## Running the full pipeline
 
 ```bash
